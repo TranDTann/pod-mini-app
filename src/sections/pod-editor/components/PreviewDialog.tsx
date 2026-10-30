@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { IcDownload, IcPlus, IcMockup, IcX } from '@/components/icons'
 import type { MockupPsd } from '../types'
-import { renderMockup } from '../utils/mockup'
+import { mockupRenderKey, useMockupRenders } from '../hooks/useMockupRenders'
 import { ColorSwatches } from './PrintAreaColors'
 import { Tooltip } from './ui'
 import { useZoomPan, ZoomPanControls, ZoomPanStage } from './ZoomPanViewer'
@@ -23,6 +23,8 @@ interface PreviewDialogProps {
   initialTarget: PreviewTarget
   /** Print side whose design is placed into the mockups (the one being edited) */
   side: number
+  /** Names of all print sides, to match them with the mockup's Smart Objects */
+  sideNames: string[]
   /** Transparent render of one side's print area, placed into the mockup */
   renderSide: (index: number) => string
   onUploadMockup: () => void
@@ -51,6 +53,7 @@ export default function PreviewDialog({
   mockups,
   initialTarget,
   side,
+  sideNames,
   renderSide,
   onUploadMockup,
   mockupUpload,
@@ -58,38 +61,24 @@ export default function PreviewDialog({
 }: PreviewDialogProps) {
   const [target, setTarget] = useState<PreviewTarget>(initialTarget)
   const [colorByMockup, setColorByMockup] = useState<Record<number, string>>({})
-  const [rendered, setRendered] = useState<{ key: string; url: string } | null>(null)
+  // What stays on screen while a new color renders
+  const [fallback, setFallback] = useState<{ view: string; url: string } | null>(null)
 
   // A removed mockup falls back to the flat design
   const mockup = target === 'design' ? null : mockups.find((m) => m.id === target) ?? null
   const colorName = mockup ? colorByMockup[mockup.id] ?? mockup.defaultColor : ''
-  const renderKey = mockup ? `${mockup.id}|${side}|${colorName}` : 'design'
+  const { urls, errors, exportPng } = useMockupRenders(mockup, colorName, side, sideNames, renderSide)
+  const renderKey = mockup ? mockupRenderKey(mockup.id, side, colorName) : 'design'
+  const renderedUrl = urls[renderKey]
+  const renderError = errors[renderKey]
   // While a new color renders, keep showing the previous render of the same mockup
   const viewKey = mockup ? `${mockup.id}|${side}` : 'design'
-  const sameView = rendered?.key.startsWith(`${viewKey}|`)
-  const imageUrl = mockup ? (sameView ? rendered!.url : null) : designUrl || null
+  const shownFallback = fallback?.view === viewKey ? fallback.url : null
+  const imageUrl = mockup ? renderedUrl ?? shownFallback : designUrl || null
+  const updating = !!mockup && !renderedUrl && !renderError && !!shownFallback
   // Switching mockup resets zoom to fit; a color change keeps zoom & pan
   const zp = useZoomPan(viewKey)
   const isUploading = !!mockupUpload && mockupUpload.status !== 'done' && mockupUpload.status !== 'error'
-
-  useEffect(() => {
-    if (!mockup) return
-    let cancelled = false
-    // renderSide is heavy synchronous canvas work: start it after the dialog has painted
-    // and its open animation is under way, so the popup appears instantly
-    const timer = window.setTimeout(() => {
-      if (cancelled) return
-      renderMockup(mockup, renderSide(side), colorName).then((url) => {
-        if (!cancelled) setRendered({ key: renderKey, url })
-      })
-    }, 60)
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-    // renderKey captures mockup / color
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [renderKey])
 
   // Capture-phase listener so editor shortcuts don't fire behind the dialog
   useEffect(() => {
@@ -108,12 +97,35 @@ export default function PreviewDialog({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [onClose, zp])
 
-  const download = () => {
-    if (!imageUrl) return
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+
+  const saveFile = (href: string, name: string) => {
     const anchor = document.createElement('a')
-    anchor.download = `${templateName}-${mockup ? `${mockup.name}-${colorName}` : 'design'}.png`
-    anchor.href = imageUrl
+    anchor.download = name
+    anchor.href = href
     anchor.click()
+  }
+
+  const download = async () => {
+    if (!mockup) {
+      if (designUrl) saveFile(designUrl, `${templateName}-design.png`)
+      return
+    }
+    // On-screen renders are JPEG; the file is always a full-quality PNG, in the color picked now
+    setExporting(true)
+    setExportError(null)
+    try {
+      const blob = await exportPng(mockup, colorName, side)
+      if (!blob) return
+      const url = URL.createObjectURL(blob)
+      saveFile(url, `${templateName}-${mockup.name}-${colorName}.png`)
+      window.setTimeout(() => URL.revokeObjectURL(url), 10000)
+    } catch (error) {
+      setExportError(String(error))
+    } finally {
+      setExporting(false)
+    }
   }
 
   const itemClass = (active: boolean) =>
@@ -202,6 +214,24 @@ export default function PreviewDialog({
             {imageUrl ? (
               <>
                 <ZoomPanStage zp={zp} src={imageUrl} alt="Preview" />
+                {/* The previous color stays visible; this says the new one is on its way */}
+                {(updating || renderError || exportError) && (
+                  <div
+                    role="status"
+                    className="absolute left-3 top-3 z-10 flex max-w-[60%] items-center gap-2 rounded-full border border-line bg-surface/95 px-3 py-1.5 text-[12px] font-medium text-ink shadow-soft backdrop-blur"
+                  >
+                    {renderError || exportError ? (
+                      <span className="truncate text-danger" title={renderError ?? exportError ?? ''}>
+                        {renderError ? `Couldn't apply ${colorName}` : "Couldn't export the PNG"}
+                      </span>
+                    ) : (
+                      <>
+                        <span className="h-3 w-3 shrink-0 animate-spin rounded-full border-[1.5px] border-accent border-t-transparent" />
+                        <span className="truncate">Applying {colorName}…</span>
+                      </>
+                    )}
+                  </div>
+                )}
                 <div className="absolute bottom-3 right-3 z-10">
                   <ZoomPanControls zp={zp} />
                 </div>
@@ -209,7 +239,9 @@ export default function PreviewDialog({
             ) : (
               <div className="flex flex-col items-center gap-2 text-ink-muted">
                 <IcMockup className="h-7 w-7 animate-pulse text-accent" />
-                <span className="text-[12.5px] font-medium">{mockup ? 'Rendering mockup…' : 'Rendering design…'}</span>
+                <span className="max-w-[420px] text-center text-[12.5px] font-medium">
+                  {renderError ? `Couldn't render: ${renderError}` : mockup ? 'Rendering mockup…' : 'Rendering design…'}
+                </span>
               </div>
             )}
           </div>
@@ -221,18 +253,32 @@ export default function PreviewDialog({
                 <ColorSwatches
                   colors={mockup.colors}
                   selected={colorName}
-                  onSelect={(name) => setColorByMockup((prev) => ({ ...prev, [mockup.id]: name }))}
+                  onSelect={(name) => {
+                    if (imageUrl) setFallback({ view: viewKey, url: imageUrl })
+                    setColorByMockup((prev) => ({ ...prev, [mockup.id]: name }))
+                  }}
                 />
               </FooterField>
             )}
 
+            {mockup && mockup.warnings.length > 0 && (
+              <span title={mockup.warnings.join('\n')} className="self-center text-[11.5px] font-medium text-ink-muted">
+                {mockup.warnings.length} PSD {mockup.warnings.length === 1 ? 'feature' : 'features'} not reproduced
+              </span>
+            )}
+
             <button
               onClick={download}
-              disabled={!imageUrl}
+              disabled={exporting || !imageUrl}
+              aria-busy={exporting}
               className="ml-auto flex h-10 items-center gap-2 self-center rounded-xl bg-accent px-5 text-[13px] font-semibold text-white shadow-accent transition-all enabled:hover:-translate-y-px enabled:hover:bg-accent-hover enabled:active:scale-95 disabled:opacity-50"
             >
-              <IcDownload className="h-4 w-4" />
-              Export PNG
+              {exporting ? (
+                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+              ) : (
+                <IcDownload className="h-4 w-4" />
+              )}
+              {exporting ? 'Preparing PNG…' : 'Export PNG'}
             </button>
           </div>
         </section>

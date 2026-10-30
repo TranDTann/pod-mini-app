@@ -1,4 +1,3 @@
-import type { MockupConfig } from '@/lib/mockup/config'
 export interface LayerImage {
   imageUrl: string
   id: number
@@ -138,20 +137,13 @@ export interface PlacedImage {
   bounds: Bounds
 }
 
-/** A layer (or group) of a mockup PSD, flattened when rendering. */
-export interface MockupDrawable {
-  /** Pixels with the layer mask baked in, at `bounds` (document space) */
-  canvas?: HTMLCanvasElement
-  bounds?: Bounds
-  children?: MockupDrawable[]
-  blendMode: string
-  /** opacity × fill opacity */
-  opacity: number
-  clipping: boolean
-  /** The Colors group: only the selected fill is drawn */
-  isColors?: boolean
-  /** Fill layer inside the Colors group */
-  colorName?: string
+/** One product color of a mockup: Solid Color layers switched on or off when rendering. */
+export interface MockupVariant {
+  name: string
+  /** The fill layer(s) with this color */
+  paths: string[]
+  /** Their groups, which must be visible for the fill to show */
+  parents: string[]
 }
 
 export interface MockupPsd {
@@ -160,14 +152,15 @@ export interface MockupPsd {
   width: number
   height: number
   thumbnailUrl: string
-  /** Smart object / print area parameters for lib/mockup */
-  config: MockupConfig
-  /** Layers below the Smart Object group */
-  base: MockupDrawable[]
-  /** Effect group pixels (Multiply × config.effectOpacity) */
-  effect: { canvas: HTMLCanvasElement; bounds: Bounds }[]
-  /** Any layers above the Effect group */
-  rest: MockupDrawable[]
+  /** Key of the compiled PSD in the mockup engine's worker */
+  engineKey: string
+  /** Smart Object slots (lib/mockup-engine) */
+  slots: string[]
+  /** Slot of the biggest visible Smart Object */
+  mainSlot: string
+  /** PSD features the engine can't reproduce */
+  warnings: string[]
+  variants: MockupVariant[]
   colors: PrintAreaColor[]
   defaultColor: string
 }

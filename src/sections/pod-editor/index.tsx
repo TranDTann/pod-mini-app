@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
+import { flushSync } from 'react-dom'
 import { ActiveSelection, Canvas, FabricImage, IText, FabricObject, Rect, Point, Shadow, filters, util, getFilterBackend } from 'fabric'
 import type {
   PsdTemplate, MockupPsd, LayerInfo, SelectedObjectProps, EditorTool,
@@ -12,9 +13,11 @@ import {
   NUDGE_PX, NUDGE_PX_LARGE, PRINT_AREA_STROKE,
 } from './constants'
 import { IcChevronRight, IcElements, IcLayers, IcMockup, IcPalette, IcSliders, IcText, IcTransform, IcUpload } from '@/components/icons'
-import { fillColor, parsePsd } from './utils/psd-parser'
+import { fillColor } from './utils/psd-parser'
+import { parseTemplateFile, sideRenderer } from './utils/template'
 import { useEditorHistory } from './hooks/useEditorHistory'
 import { useUploadProgress } from './hooks/useUploadProgress'
+import { usePresence } from './hooks/usePresence'
 import EditorToolbar from './components/EditorToolbar'
 import LeftSidebar from './components/LeftSidebar'
 import LayerPanel from './components/LayerPanel'
@@ -33,7 +36,7 @@ import CollapsedPanelRail, { type RailItem } from './components/CollapsedPanelRa
 import { expandPanelSection, Tooltip } from './components/ui'
 import { buildElement, EDITABLE_FILL_KEY } from './elements/build'
 import type { ElementItem } from './elements/library'
-import { parseMockupPsd } from './utils/mockup'
+import { disposeMockup, parseMockupPsd } from './utils/mockup'
 import { installSoftControls } from './utils/controls'
 import { installSnapping } from './utils/snapping'
 import { printAreaStrokeFor } from './utils/contrast'
@@ -45,6 +48,28 @@ const LIVE_PROPS_INTERVAL = 80
 /** Print-area render for mockups: × PSD resolution, capped in pixels */
 const SIDE_RENDER_SCALE = 3
 const SIDE_RENDER_MAX_PX = 3600
+
+// ── Side panels: slide open / closed while the stage follows ──
+const PANEL_WIDTH = 300
+const RAIL_WIDTH = 52
+/** Flex gap between the editor columns (gap-2.5) */
+const COLUMN_GAP = 10
+const PANEL_MOTION_MS = 280
+const PANEL_MOTION = `${PANEL_MOTION_MS}ms cubic-bezier(0.22, 1, 0.36, 1)`
+/** Quiet time after the stage's last resize before Fabric re-renders at the new size */
+const RESIZE_SETTLE_MS = 90
+
+/** Viewport transform that fits the artboard, centered, into a w × h stage. */
+function fitTransform(w: number, h: number): [number, number, number, number, number, number] {
+  const zoom = Math.max(MIN_ZOOM, Math.min((w - STAGE_PADDING * 2) / CANVAS_WIDTH, (h - STAGE_PADDING * 2) / CANVAS_HEIGHT))
+  return [zoom, 0, 0, zoom, (w - CANVAS_WIDTH * zoom) / 2, (h - CANVAS_HEIGHT * zoom) / 2]
+}
+
+/** Whether the viewport is (still) the fitted view for a w × h stage. */
+function isFitted(vpt: number[], w: number, h: number) {
+  const fit = fitTransform(w, h)
+  return Math.abs(vpt[0] - fit[0]) < 1e-4 && Math.abs(vpt[4] - fit[4]) < 0.5 && Math.abs(vpt[5] - fit[5]) < 0.5
+}
 
 // ── Fabric object helpers ──
 
@@ -118,7 +143,8 @@ type OriginState = Record<string, unknown>
 
 // Persist editor metadata through toJSON/loadFromJSON (undo/redo) and clone()
 installCurvedTextBox()
-FabricObject.customProperties = ['_editorId', '_origin', '_hiResKey', EDITABLE_FILL_KEY, '_name', CURVE_KEY]
+FabricObject.customProperties = ['_editorId', '_origin', '_hiResKey', EDITABLE_FILL_KEY, '_name', CURVE_KEY, '_side']
+
 
 function isEditableShape(obj: FabricObject) {
   return !!(obj as FabricObject & Record<string, unknown>)[EDITABLE_FILL_KEY]
@@ -190,6 +216,12 @@ function setLocked(obj: FabricObject, locked: boolean) {
     borderColor: locked ? '#7f8c83' : PRINT_AREA_STROKE,
   })
 }
+
+/** Print side (index) a user element belongs to: each side keeps its own design. */
+const SIDE_KEY = '_side'
+type SideObject = FabricObject & { [SIDE_KEY]?: number }
+const getSide = (obj: FabricObject) => (obj as SideObject)[SIDE_KEY] ?? 0
+const setSide = (obj: FabricObject, side: number) => ((obj as SideObject)[SIDE_KEY] = side)
 
 /** Template objects (mockup, print-area guide) are non-interactive; user objects never are. */
 function isTemplateObject(obj: FabricObject) {
@@ -442,6 +474,8 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
   const zoomPercent = Math.round(view.zoom * 100)
 
   // Pan refs
+  /** Elements on all sides (`layers` only lists the side on screen) */
+  const [totalLayers, setTotalLayers] = useState(0)
   const [isPanning, setIsPanning] = useState(false)
   /** Panning while the mouse wheel (middle button) is held — a temporary Hand tool */
   const [isWheelPanning, setIsWheelPanning] = useState(false)
@@ -453,6 +487,20 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
   const isUserObject = useCallback((obj: FabricObject) => {
     return obj !== mockupRef.current && obj !== printAreaRectRef.current && !isTemplateObject(obj)
   }, [])
+
+  // Side shown on the canvas. Elements of the other sides stay on the canvas (so undo/redo and
+  // the per-side renders see every side) but are neither drawn, hit-tested nor listed.
+  const activeSideRef = useRef(0)
+  /** User element of the side being edited */
+  const isSideObject = useCallback(
+    (obj: FabricObject) => isUserObject(obj) && getSide(obj) === activeSideRef.current,
+    [isUserObject],
+  )
+  // A multi-selection isn't an element itself: it has no side of its own
+  const isOffSide = useCallback(
+    (obj: FabricObject) => !(obj instanceof ActiveSelection) && isUserObject(obj) && !isSideObject(obj),
+    [isUserObject, isSideObject],
+  )
 
   /** Index of the lowest slot a user object may occupy (above mockup / print-area guide). */
   const baseLayerIndex = useCallback(() => {
@@ -488,10 +536,11 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
     const canvas = fabricRef.current
     if (!canvas) return
     invalidate?.forEach((obj) => thumbCache.current.delete(obj))
+    setTotalLayers(canvas.getObjects().filter(isUserObject).length)
     setLayers(
       canvas
         .getObjects()
-        .filter(isUserObject)
+        .filter(isSideObject)
         .map((obj) => ({
           id: getObjectId(obj),
           name:
@@ -504,7 +553,7 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
           locked: isLocked(obj),
         })),
     )
-  }, [thumbnailFor, isUserObject])
+  }, [thumbnailFor, isSideObject, isUserObject])
 
   const refreshSelectedProps = useCallback(() => {
     const canvas = fabricRef.current
@@ -577,17 +626,7 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
   const fitToScreen = useCallback(() => {
     const canvas = fabricRef.current
     if (!canvas) return
-    const w = canvas.getWidth()
-    const h = canvas.getHeight()
-    const zoom = Math.max(
-      MIN_ZOOM,
-      Math.min((w - STAGE_PADDING * 2) / CANVAS_WIDTH, (h - STAGE_PADDING * 2) / CANVAS_HEIGHT),
-    )
-    canvas.setViewportTransform([
-      zoom, 0, 0, zoom,
-      (w - CANVAS_WIDTH * zoom) / 2,
-      (h - CANVAS_HEIGHT * zoom) / 2,
-    ])
+    canvas.setViewportTransform(fitTransform(canvas.getWidth(), canvas.getHeight()))
     syncView()
   }, [syncView])
 
@@ -697,7 +736,10 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
     const renderObjects = canvas._renderObjects.bind(canvas)
     canvas._renderObjects = (ctx, objects) => {
       const area = printAreaRectRef.current
-      if (!area || clipSuspendedRef.current) return renderObjects(ctx, objects)
+      // Side renders (export / preview) pass their own side's objects
+      if (clipSuspendedRef.current) return renderObjects(ctx, objects)
+      objects = objects.filter((o) => !isOffSide(o))
+      if (!area) return renderObjects(ctx, objects)
       renderObjects(ctx, objects.filter((o) => !isUserObject(o)))
       ctx.save()
       ctx.beginPath()
@@ -707,6 +749,15 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
       ctx.restore()
       if (area.visible !== false) drawPrintAreaOutline(ctx, area, canvas.getZoom())
     }
+    // Other sides' elements can't be clicked or marquee-selected
+    const checkTarget = canvas._checkTarget.bind(canvas)
+    canvas._checkTarget = (obj, pointer) => !isOffSide(obj as FabricObject) && checkTarget(obj, pointer)
+    const collectObjects = canvas.collectObjects.bind(canvas)
+    canvas.collectObjects = (...args) => collectObjects(...args).filter((o) => !isOffSide(o as FabricObject))
+    // New elements belong to the side being edited
+    canvas.on('object:added', ({ target }) => {
+      if (isUserObject(target) && (target as SideObject)[SIDE_KEY] === undefined) setSide(target, activeSideRef.current)
+    })
     canvas.on('text:changed', ({ target }) => {
       // Keep a curved text's arc sized to what's being typed (a new line straightens it)
       if (target instanceof IText && getCurve(target) !== 0) {
@@ -725,7 +776,7 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
       height: CANVAS_HEIGHT,
       getReferences: () => [
         ...(printAreaRectRef.current ? [printAreaRectRef.current] : []),
-        ...canvas.getObjects().filter((o) => isUserObject(o) && !canvas.getActiveObjects().includes(o)),
+        ...canvas.getObjects().filter((o) => isSideObject(o) && !canvas.getActiveObjects().includes(o)),
       ],
       afterSnap: (obj) => {
         if (printAreaRectRef.current) clampIntoBox(obj, referenceBox(printAreaRectRef.current))
@@ -753,10 +804,50 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
     }
     stage.addEventListener('wheel', handleWheel, { passive: false })
 
-    // Keep the canvas element sized to the stage — the stage itself never scrolls
+    // Keep the canvas element sized to the stage — the stage itself never scrolls.
+    // While a side panel slides the stage resizes every frame. Re-rendering Fabric
+    // at a new zoom each frame is heavy (object caches redraw), so the rendered
+    // canvas is moved / scaled with a CSS transform instead, and Fabric is resized
+    // and redrawn once the size settles — at the very transform the preview showed.
+    let firstResize = true
+    let settleTimer = 0
+    /** Where the view should be for a w × h stage, from what Fabric currently renders */
+    const targetTransform = (w: number, h: number) => {
+      const vpt = canvas.viewportTransform
+      const prevW = canvas.getWidth()
+      const prevH = canvas.getHeight()
+      // A fitted view stays fitted; a zoomed / panned one keeps its zoom and stays centered
+      return isFitted(vpt, prevW, prevH)
+        ? fitTransform(w, h)
+        : ([vpt[0], vpt[1], vpt[2], vpt[3], vpt[4] + (w - prevW) / 2, vpt[5] + (h - prevH) / 2] as typeof vpt)
+    }
+    const settle = () => {
+      const w = stage.clientWidth
+      const h = stage.clientHeight
+      const next = targetTransform(w, h)
+      canvas.wrapperEl.style.transform = ''
+      canvas.setDimensions({ width: w, height: h })
+      canvas.setViewportTransform(next)
+      canvas.renderAll()
+      flushSync(syncViewNow)
+    }
     const observer = new ResizeObserver(() => {
-      canvas.setDimensions({ width: stage.clientWidth, height: stage.clientHeight })
-      fitToScreen()
+      if (firstResize) {
+        firstResize = false
+        canvas.setDimensions({ width: stage.clientWidth, height: stage.clientHeight })
+        fitToScreen()
+        return
+      }
+      const vpt = canvas.viewportTransform
+      const next = targetTransform(stage.clientWidth, stage.clientHeight)
+      const k = next[0] / vpt[0]
+      const wrapper = canvas.wrapperEl
+      wrapper.style.transformOrigin = '0 0'
+      wrapper.style.transform = `matrix(${k}, 0, 0, ${k}, ${next[4] - k * vpt[4]}, ${next[5] - k * vpt[5]})`
+      // The artboard backdrop follows in the same frame
+      flushSync(() => setView({ x: next[4], y: next[5], zoom: next[0] }))
+      window.clearTimeout(settleTimer)
+      settleTimer = window.setTimeout(settle, RESIZE_SETTLE_MS)
     })
     observer.observe(stage)
 
@@ -764,6 +855,7 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
     flushSnapshot()
     return () => {
       observer.disconnect()
+      window.clearTimeout(settleTimer)
       stage.removeEventListener('wheel', handleWheel)
       canvas.dispose()
       fabricRef.current = null
@@ -788,7 +880,12 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
         const color = activeColors.find((c) => c.name === activeColorName)
         const mockup = mockupRef.current
         if (mockup && activePrintArea?.imageUrl && activePrintArea.imageBounds) {
-          const url = color ? await fillColor(activePrintArea.imageUrl, color.rgb) : activePrintArea.imageUrl
+          const render = sideRenderer(template)
+          const url = render
+            ? render(activeAreaIndex, color?.name)
+            : color
+              ? await fillColor(activePrintArea.imageUrl, color.rgb)
+              : activePrintArea.imageUrl
           if (cancelled) return
           const { scaleX, scaleY } = mockup
           const { width, height } = mockup
@@ -831,13 +928,17 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
     const loadTemplate = async () => {
       const { fitScale, offsetX, offsetY } = templateLayout(template)
 
-      // Like site-admin: show the active print area's base layer, fall back to the PSD composite
+      // The side's product image in the chosen color: rendered from the template spec (every
+      // base / color / overlay layer composited), or for older templates tinted from the base layer
       const areaImage = activePrintArea?.imageUrl && activePrintArea.imageBounds
       const color = activeColors.find((c) => c.name === activeColorName)
+      const render = sideRenderer(template)
       const mockupUrl = areaImage
-        ? color
-          ? await fillColor(activePrintArea.imageUrl, color.rgb)
-          : activePrintArea.imageUrl
+        ? render
+          ? render(activeAreaIndex, color?.name)
+          : color
+            ? await fillColor(activePrintArea.imageUrl, color.rgb)
+            : activePrintArea.imageUrl
         : template.mockupDataUrl
       const bounds = areaImage
         ? activePrintArea.imageBounds!
@@ -929,6 +1030,50 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
     [getPlacementBox],
   )
 
+  const [elementsOpen, setElementsOpen] = useState(false)
+  // Right-hand panel can be hidden for the largest possible stage; remembered per browser
+  const [panelOpen, setPanelOpen] = useState(() => {
+    try {
+      return localStorage.getItem('pod-editor:panel') !== 'closed'
+    } catch {
+      return true
+    }
+  })
+  /** Reopen the side panel, optionally scrolled to (and expanding) one section. */
+  const openPanel = useCallback((sectionId?: string) => {
+    if (sectionId) expandPanelSection(sectionId)
+    try {
+      localStorage.setItem('pod-editor:panel', 'open')
+    } catch {}
+    setPanelOpen(true)
+    if (sectionId) {
+      requestAnimationFrame(() =>
+        document.querySelector(`[data-panel-section="${sectionId}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+      )
+    }
+  }, [])
+  /** After adding an element: show the panel and bring its settings (already selected) into view. */
+  const revealSettings = useCallback(() => {
+    expandPanelSection('position')
+    // Wait for the selection's style / position sections to render before scrolling to them
+    requestAnimationFrame(() => {
+      const id = document.querySelector('[data-panel-section="style"]') ? 'style' : 'position'
+      openPanel(id)
+    })
+  }, [openPanel])
+  // Panels stay mounted through their closing slide
+  const elementsMounted = usePresence(elementsOpen, PANEL_MOTION_MS)
+  const panelMounted = usePresence(panelOpen, PANEL_MOTION_MS)
+
+  const togglePanel = useCallback(() => {
+    setPanelOpen((open) => {
+      try {
+        localStorage.setItem('pod-editor:panel', open ? 'closed' : 'open')
+      } catch {}
+      return !open
+    })
+  }, [])
+
   const handleImportImage = useCallback(() => fileInputRef.current?.click(), [])
 
   /** Adds an image file; `at` (artboard coords) is used for drag-and-drop, otherwise it's centered. */
@@ -960,12 +1105,13 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
           canvas.add(image)
           canvas.setActiveObject(image)
           commit({ layers: true })
+          revealSettings()
         })
       } catch (err) {
         console.error('Failed to load image:', err)
       }
     },
-    [commit, runUpload, getPlacementBox, placeCentered],
+    [commit, runUpload, getPlacementBox, placeCentered, revealSettings],
   )
 
   const handleFileSelected = useCallback(
@@ -993,38 +1139,8 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
     canvas.add(text)
     canvas.setActiveObject(text)
     commit({ layers: true })
-  }, [commit, placeCentered])
-
-  const [elementsOpen, setElementsOpen] = useState(false)
-  // Right-hand panel can be hidden for the largest possible stage; remembered per browser
-  const [panelOpen, setPanelOpen] = useState(() => {
-    try {
-      return localStorage.getItem('pod-editor:panel') !== 'closed'
-    } catch {
-      return true
-    }
-  })
-  /** Reopen the side panel, optionally scrolled to (and expanding) one section. */
-  const openPanel = useCallback((sectionId?: string) => {
-    if (sectionId) expandPanelSection(sectionId)
-    try {
-      localStorage.setItem('pod-editor:panel', 'open')
-    } catch {}
-    setPanelOpen(true)
-    if (sectionId) {
-      requestAnimationFrame(() =>
-        document.querySelector(`[data-panel-section="${sectionId}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
-      )
-    }
-  }, [])
-  const togglePanel = useCallback(() => {
-    setPanelOpen((open) => {
-      try {
-        localStorage.setItem('pod-editor:panel', open ? 'closed' : 'open')
-      } catch {}
-      return !open
-    })
-  }, [])
+    revealSettings()
+  }, [commit, placeCentered, revealSettings])
 
   /** Adds a library element, sized to ~60% of the print area and centered in it. */
   const handleAddElement = useCallback(
@@ -1041,7 +1157,9 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
       const minY = Math.min(...rects.map((r) => r.top))
       const maxX = Math.max(...rects.map((r) => r.left + r.width))
       const maxY = Math.max(...rects.map((r) => r.top + r.height))
-      const k = Math.min((box.w * 0.6) / (maxX - minX), (box.h * 0.6) / (maxY - minY))
+      // Scenes are full illustrations, so they start larger than icons and text
+      const fill = item.kind === 'svg' && item.scene ? 0.85 : 0.6
+      const k = Math.min((box.w * fill) / (maxX - minX), (box.h * fill) / (maxY - minY))
       const mid = new Point((minX + maxX) / 2, (minY + maxY) / 2)
 
       for (const obj of parts) {
@@ -1058,8 +1176,9 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
       canvas.setActiveObject(parts.length > 1 ? new ActiveSelection(parts, { canvas }) : parts[0])
       canvas.requestRenderAll()
       commit({ layers: true })
+      revealSettings()
     },
-    [commit, getPlacementBox],
+    [commit, getPlacementBox, revealSettings],
   )
 
   // ── Style actions ──
@@ -1138,6 +1257,7 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
         copy.setCoords()
         if (printAreaRectRef.current) clampIntoBox(copy, referenceBox(printAreaRectRef.current))
         setObjectId(copy, ++idCounter.current)
+        setSide(copy, activeSideRef.current)
         captureOrigin(copy)
         canvas.add(copy)
       }
@@ -1250,9 +1370,19 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
   const handleFit = useCallback(() => scaleToBox('fit'), [scaleToBox])
   const handleFill = useCallback(() => scaleToBox('fill'), [scaleToBox])
 
+  /** Moves one step up / down among the elements of the current side (other sides' are skipped). */
+  const stepLayer = useCallback(
+    (obj: FabricObject, canvas: Canvas, dir: 1 | -1) => {
+      const objects = canvas.getObjects()
+      let i = objects.indexOf(obj) + dir
+      while (i >= 0 && i < objects.length && !isSideObject(objects[i])) i += dir
+      if (i >= baseLayerIndex() && i < objects.length) canvas.moveObjectTo(obj, i)
+    },
+    [isSideObject, baseLayerIndex],
+  )
   const handleBringForward = useCallback(
-    () => withActive((obj, canvas) => canvas.bringObjectForward(obj), { layers: true, allowLocked: true }),
-    [withActive],
+    () => withActive((obj, canvas) => stepLayer(obj, canvas, 1), { layers: true, allowLocked: true }),
+    [withActive, stepLayer],
   )
   const handleBringToFront = useCallback(
     () => withActive((obj, canvas) => canvas.bringObjectToFront(obj), { layers: true, allowLocked: true }),
@@ -1260,14 +1390,9 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
   )
   const handleSendBackward = useCallback(
     () =>
-      withActive(
-        (obj, canvas) => {
-          // Never slide under the mockup or the print-area guide
-          if (canvas.getObjects().indexOf(obj) > baseLayerIndex()) canvas.sendObjectBackwards(obj)
-        },
-        { layers: true, allowLocked: true },
-      ),
-    [withActive, baseLayerIndex],
+      // Never slides under the mockup or the print-area guide
+      withActive((obj, canvas) => stepLayer(obj, canvas, -1), { layers: true, allowLocked: true }),
+    [withActive, stepLayer],
   )
   const handleSendToBack = useCallback(
     () => withActive((obj, canvas) => canvas.moveObjectTo(obj, baseLayerIndex()), { layers: true, allowLocked: true }),
@@ -1426,7 +1551,7 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
           height: box.height * zoom,
           // Well above PSD resolution so the print stays sharp once placed into a mockup
           multiplier: Math.min(SIDE_RENDER_SCALE / fitScale, SIDE_RENDER_MAX_PX / box.width) / zoom,
-          filter: (obj) => isUserObject(obj as FabricObject),
+          filter: (obj) => isUserObject(obj as FabricObject) && getSide(obj as FabricObject) === index,
         }),
       )
       clipSuspendedRef.current = false
@@ -1484,8 +1609,120 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
   )
 
   const handleRemoveMockup = useCallback(
-    (id: number) => setMockupState((prev) => ({ ...prev, list: prev.list.filter((m) => m.id !== id) })),
-    [],
+    (id: number) => {
+      const removed = mockups.find((m) => m.id === id)
+      if (removed) disposeMockup(removed)
+      setMockupState((prev) => ({ ...prev, list: prev.list.filter((m) => m.id !== id) }))
+    },
+    [mockups],
+  )
+
+  // ── Print sides: each keeps its own elements and selection ──
+
+  const selectionBySide = useRef(new Map<number, number[]>())
+
+  /** Shows a side's elements and brings back what was selected there. */
+  const showSide = useCallback(
+    (index: number, select?: FabricObject[]) => {
+      const canvas = fabricRef.current
+      activeSideRef.current = index
+      setActiveAreaIndex(index)
+      if (!canvas) return
+      const ids = selectionBySide.current.get(index) ?? []
+      const objects =
+        select ?? canvas.getObjects().filter((o) => isSideObject(o) && o.visible !== false && ids.includes(getObjectId(o)))
+      if (objects.length > 0) {
+        canvas.setActiveObject(objects.length > 1 ? new ActiveSelection(objects, { canvas }) : objects[0])
+      }
+      updateObjectCursors(canvas, isUserObject)
+      canvas.requestRenderAll()
+      refreshLayers()
+      refreshSelectedProps()
+    },
+    [isSideObject, isUserObject, refreshLayers, refreshSelectedProps],
+  )
+
+  const handleAreaChange = useCallback(
+    (index: number) => {
+      const canvas = fabricRef.current
+      if (index === activeSideRef.current) return
+      if (canvas) {
+        selectionBySide.current.set(activeSideRef.current, canvas.getActiveObjects().map(getObjectId))
+        canvas.discardActiveObject()
+      }
+      showSide(index)
+    },
+    [showSide],
+  )
+
+  // A new template starts on its first side; kept elements stay on their side when it still
+  // exists, otherwise they move to the first one rather than becoming unreachable
+  useEffect(() => {
+    const canvas = fabricRef.current
+    if (!canvas) return
+    canvas.discardActiveObject()
+    const sideCount = Math.max(1, template?.printAreas.length ?? 0)
+    canvas.getObjects().filter(isUserObject).forEach((o) => {
+      if (getSide(o) >= sideCount) setSide(o, 0)
+    })
+    activeSideRef.current = 0
+    selectionBySide.current.clear()
+    refreshLayers()
+  }, [template, isUserObject, refreshLayers])
+
+  /** Print area of a side in artboard coordinates. */
+  const sideBox = useCallback(
+    (index: number) => {
+      const area = template?.printAreas[index]
+      if (!template || !area) return { left: 0, top: 0, w: CANVAS_WIDTH, h: CANVAS_HEIGHT }
+      const { fitScale, offsetX, offsetY } = templateLayout(template)
+      return { left: offsetX + area.left * fitScale, top: offsetY + area.top * fitScale, w: area.width * fitScale, h: area.height * fitScale }
+    },
+    [template],
+  )
+
+  /**
+   * Moves (or copies) the selected elements to another side, at the same relative spot in its
+   * print area and scaled with it, then switches to that side with them selected.
+   */
+  const handleSendToSide = useCallback(
+    async (target: number, copy = false) => {
+      const canvas = fabricRef.current
+      const from = activeSideRef.current
+      if (!canvas || target === from) return
+      const active = canvas.getActiveObjects().filter(isUserObject)
+      if (active.length === 0) return
+      selectionBySide.current.set(from, copy ? active.map(getObjectId) : [])
+      canvas.discardActiveObject() // members get their absolute transforms back
+      const src = sideBox(from)
+      const dst = sideBox(target)
+      const k = Math.min(dst.w / src.w, dst.h / src.h)
+      const moved: FabricObject[] = []
+      for (const obj of active) {
+        const item = copy ? await obj.clone() : obj
+        const c = obj.getCenterPoint()
+        item.set({ scaleX: obj.scaleX * k, scaleY: obj.scaleY * k })
+        item.setPositionByOrigin(
+          new Point(dst.left + ((c.x - src.left) / src.w) * dst.w, dst.top + ((c.y - src.top) / src.h) * dst.h),
+          'center',
+          'center',
+        )
+        setSide(item, target)
+        if (copy) {
+          setLocked(item, false)
+          setObjectId(item, ++idCounter.current)
+          captureOrigin(item)
+          canvas.add(item)
+        } else {
+          captureOrigin(item) // "Reset" now returns to its place on the new side
+        }
+        item.setCoords()
+        moved.push(item)
+      }
+      showSide(target, moved)
+      commit({ layers: true })
+    },
+    [isUserObject, sideBox, showSide, commit],
   )
 
   // ── Layer panel actions ──
@@ -1500,12 +1737,14 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
       const canvas = fabricRef.current
       const obj = findObject(id)
       if (!canvas || !obj) return
-      // User layers sit above the mockup / print-area guide
-      canvas.moveObjectTo(obj, baseLayerIndex() + index)
+      // `index` counts this side's layers; take the canvas slot of the layer now there
+      const sideObjects = canvas.getObjects().filter(isSideObject)
+      const target = sideObjects[Math.max(0, Math.min(index, sideObjects.length - 1))]
+      if (target) canvas.moveObjectTo(obj, canvas.getObjects().indexOf(target))
       canvas.requestRenderAll()
       commit({ layers: true })
     },
-    [findObject, baseLayerIndex, commit],
+    [findObject, isSideObject, commit],
   )
 
   const handleSelectLayer = useCallback(
@@ -1573,13 +1812,14 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
   // ── Template switching ──
 
   // Work in progress = any layer on the canvas, or a PSD template loaded
-  const hasWork = layers.length > 0 || !isBlank
+  // Replacing a template affects every side, not just the one on screen
+  const hasWork = totalLayers > 0 || !isBlank
   const closeConfirm = useCallback(() => setConfirmOptions(null), [])
 
   const replaceDescription = (target: string) => (
     <>
       You&apos;re editing <b className="font-semibold text-ink">{templateName}</b>
-      {layers.length > 0 && <> with {layers.length} layer{layers.length > 1 ? 's' : ''}</>}. Switching to {target} will
+      {totalLayers > 0 && <> with {totalLayers} layer{totalLayers > 1 ? 's' : ''}</>}. Switching to {target} will
       replace the current mockup and print areas.
     </>
   )
@@ -1588,8 +1828,8 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
   const keepLayersOption = () => ({
     label: 'Keep current layers',
     hint:
-      layers.length > 0
-        ? `Unchecked: ${layers.length} layer${layers.length > 1 ? 's' : ''} (images & text) will be removed.`
+      totalLayers > 0
+        ? `Unchecked: ${totalLayers} layer${totalLayers > 1 ? 's' : ''} (images & text) will be removed.`
         : 'Unchecked: images & text on the canvas will be removed.',
   })
 
@@ -1605,7 +1845,8 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
   }, [isUserObject, commit])
 
   const handleSwitchToBlank = useCallback(() => {
-    const apply = () =>
+    const apply = () => {
+      setActiveAreaIndex(0)
       onTemplateChange?.({
         name: 'Blank',
         width: 1200,
@@ -1614,6 +1855,7 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
         printAreas: [],
         layerImages: [],
       })
+    }
     if (isBlank) return
     if (!hasWork) return apply()
     setConfirmOptions({
@@ -1627,7 +1869,7 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
       },
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onTemplateChange, isBlank, hasWork, templateName, layers.length])
+  }, [onTemplateChange, isBlank, hasWork, templateName, totalLayers])
 
   const handleRequestUploadPsd = useCallback(() => {
     const pick = (keepLayers: boolean) => {
@@ -1644,30 +1886,28 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
       onConfirm: pick,
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasWork, templateName, layers.length])
+  }, [hasWork, templateName, totalLayers])
 
   const handleRemoveTemplate = useCallback(() => {
     setConfirmOptions({
       title: 'Remove this template?',
       description: (
         <>
-          <b className="font-semibold text-ink">{templateName}</b> and all {layers.length || ''} layer
-          {layers.length === 1 ? '' : 's'} on the canvas will be removed. This can&apos;t be undone.
+          <b className="font-semibold text-ink">{templateName}</b> and all {totalLayers || ''} layer
+          {totalLayers === 1 ? '' : 's'} on the canvas will be removed. This can&apos;t be undone.
         </>
       ),
       confirmLabel: 'Remove template',
       tone: 'danger',
       onConfirm: () => onRemoveTemplate?.(),
     })
-  }, [templateName, layers.length, onRemoveTemplate])
+  }, [templateName, totalLayers, onRemoveTemplate])
 
   const loadPsdFile = useCallback(
     async (file: File) => {
       try {
         const newTemplate = await runUpload(file, 'psd', async () => {
-          const parsed = await parsePsd(await file.arrayBuffer())
-          parsed.name = file.name.replace(/\.psd$/i, '')
-          return parsed
+          return parseTemplateFile(await file.arrayBuffer(), file.name)
         })
         if (!keepLayersOnUploadRef.current) clearUserLayers()
         keepLayersOnUploadRef.current = true
@@ -1750,7 +1990,7 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
       })
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [addImageFile, loadPsdFile, hasWork, templateName, layers.length],
+    [addImageFile, loadPsdFile, hasWork, templateName, totalLayers],
   )
 
   // ── Keyboard shortcuts ──
@@ -1883,9 +2123,30 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
           elementsOpen={elementsOpen}
           onToggleElements={() => setElementsOpen((v) => !v)}
         />
-        {elementsOpen && (
-          <ElementsPanel onAdd={handleAddElement} onClose={() => setElementsOpen(false)} />
-        )}
+        {/* Library slides in from the sidebar; the stage narrows along with it */}
+        <div
+          aria-hidden={!elementsOpen}
+          inert={!elementsOpen}
+          className="relative shrink-0 overflow-hidden motion-reduce:transition-none"
+          style={{
+            width: elementsOpen ? PANEL_WIDTH : 0,
+            // Cancels the column gap while closed
+            marginRight: elementsOpen ? 0 : -COLUMN_GAP,
+            transition: `width ${PANEL_MOTION}, margin ${PANEL_MOTION}`,
+          }}
+        >
+          <div
+            className="absolute inset-y-0 left-0 motion-reduce:transition-none"
+            style={{
+              width: PANEL_WIDTH,
+              opacity: elementsOpen ? 1 : 0,
+              transform: elementsOpen ? 'none' : 'translateX(-24px)',
+              transition: `opacity ${PANEL_MOTION}, transform ${PANEL_MOTION}`,
+            }}
+          >
+            {elementsMounted && <ElementsPanel onAdd={handleAddElement} onClose={() => setElementsOpen(false)} />}
+          </div>
+        </div>
 
         {/* Stage — fixed size, never scrolls; zoom & pan happen in the Fabric viewport */}
         <div
@@ -1944,7 +2205,7 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
               {CANVAS_WIDTH} × {CANVAS_HEIGHT} px
             </div>
             <div className="pointer-events-auto">
-              <PrintAreaTabs printAreas={printAreas} activeIndex={activeAreaIndex} onAreaChange={setActiveAreaIndex} />
+              <PrintAreaTabs printAreas={printAreas} activeIndex={activeAreaIndex} onAreaChange={handleAreaChange} />
             </div>
             <div className="pointer-events-auto">
               <ZoomBar
@@ -1960,77 +2221,102 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
           </div>
         </div>
 
-        {/* Right sidebar — hidden, it leaves a rail so the settings stay discoverable */}
-        {!panelOpen && <CollapsedPanelRail items={railItems} onOpen={openPanel} />}
-        {panelOpen && (
-          <div className="flex w-[300px] shrink-0 flex-col overflow-y-auto rounded-2xl border border-line bg-surface shadow-soft animate-[fade-in_150ms_ease-out]">
-            {/* Header with an obvious way to fold the panel away */}
-            <div className="sticky top-0 z-20 flex items-center justify-between border-b border-line/70 bg-surface/95 py-2 pl-4 pr-2 backdrop-blur">
-              <span className="text-[12px] font-semibold uppercase tracking-[0.14em] text-ink-subtle">Settings</span>
-              <Tooltip label="Hide side panel" description="More room for the editor" shortcut="Ctrl ." side="left">
-                <button
-                  onClick={togglePanel}
-                  aria-label="Collapse side panel"
-                  className="flex h-8 items-center gap-1 rounded-lg px-2 text-[12px] font-medium text-ink-muted transition-colors hover:bg-accent-soft hover:text-accent"
-                >
-                  Hide
-                  <IcChevronRight className="h-4 w-4" />
-                </button>
-              </Tooltip>
-            </div>
-            {/* Template-level: mockups, colors, layers */}
-            {printAreas.length > 0 && (
-              <MockupPanel
-                mockups={mockups}
-                onUpload={handleUploadMockupClick}
-                onOpen={openPreview}
-                onRemove={handleRemoveMockup}
-              />
-            )}
-            <PrintAreaColors
-              colors={activeColors}
-              selected={activeColorName}
-              onSelect={(name) => setColorByArea((prev) => ({ ...prev, [activeAreaIndex]: name }))}
-            />
-            <LayerPanel
-              layers={layers}
-              selectedLayerId={selectedLayerId}
-              onSelectLayer={handleSelectLayer}
-              onDeleteLayer={handleDeleteLayer}
-              onToggleVisible={handleToggleVisible}
-              onToggleLock={handleToggleLayerLock}
-              onReorder={handleReorderLayer}
-            />
-
-            {/* Selected element settings */}
-            {styleProps && (
-              <StylePanel
-                style={styleProps}
-                onTextChange={handleTextStyle}
-                onImageChange={handleImageStyle}
-                onShapeChange={handleShapeStyle}
-              />
-            )}
-            {selectedObjectProps && (
-              <PositionPanel
-                objectProps={selectedObjectProps}
-                relativeToPrintArea={!!activePrintArea}
-                onPropChange={handlePropChange}
-                onAlign={handleAlign}
-              />
-            )}
-            {selectedObjectProps && (
-              <ElementActions
-                kind={styleProps?.kind === 'text' ? 'text' : styleProps?.kind === 'shape' || !styleProps ? 'element' : 'image'}
-                locked={selectedObjectProps.locked}
-                canReset={selectedObjectProps.modified}
-                onReset={handleResetElement}
-                onDelete={handleDelete}
-                onDuplicate={handleDuplicate}
-              />
-            )}
+        {/* Right sidebar — folds into a rail so the settings stay discoverable; the two cross-fade while the width slides */}
+        <div
+          className="relative shrink-0 overflow-hidden motion-reduce:transition-none"
+          style={{ width: panelOpen ? PANEL_WIDTH : RAIL_WIDTH, transition: `width ${PANEL_MOTION}` }}
+        >
+          <div
+            aria-hidden={panelOpen}
+            inert={panelOpen}
+            className="absolute inset-y-0 right-0 flex motion-reduce:transition-none"
+            style={{ width: RAIL_WIDTH, opacity: panelOpen ? 0 : 1, transition: `opacity ${PANEL_MOTION}` }}
+          >
+            <CollapsedPanelRail items={railItems} onOpen={openPanel} />
           </div>
-        )}
+          {panelMounted && (
+            <div
+              aria-hidden={!panelOpen}
+              inert={!panelOpen}
+              className="absolute inset-y-0 left-0 flex flex-col overflow-y-auto rounded-2xl border border-line bg-surface shadow-soft motion-reduce:transition-none"
+              style={{
+                width: PANEL_WIDTH,
+                opacity: panelOpen ? 1 : 0,
+                transform: panelOpen ? 'none' : 'translateX(24px)',
+                transition: `opacity ${PANEL_MOTION}, transform ${PANEL_MOTION}`,
+              }}
+            >
+              {/* Header with an obvious way to fold the panel away */}
+              <div className="sticky top-0 z-20 flex items-center justify-between border-b border-line/70 bg-surface/95 py-2 pl-4 pr-2 backdrop-blur">
+                <span className="text-[12px] font-semibold uppercase tracking-[0.14em] text-ink-subtle">Settings</span>
+                <Tooltip label="Hide side panel" description="More room for the editor" shortcut="Ctrl ." side="left">
+                  <button
+                    onClick={togglePanel}
+                    aria-label="Collapse side panel"
+                    className="flex h-8 items-center gap-1 rounded-lg px-2 text-[12px] font-medium text-ink-muted transition-colors hover:bg-accent-soft hover:text-accent"
+                  >
+                    Hide
+                    <IcChevronRight className="h-4 w-4" />
+                  </button>
+                </Tooltip>
+              </div>
+              {/* Template-level: mockups, colors, layers */}
+              {printAreas.length > 0 && (
+                <MockupPanel
+                  mockups={mockups}
+                  onUpload={handleUploadMockupClick}
+                  onOpen={openPreview}
+                  onRemove={handleRemoveMockup}
+                />
+              )}
+              <PrintAreaColors
+                colors={activeColors}
+                selected={activeColorName}
+                onSelect={(name) => setColorByArea((prev) => ({ ...prev, [activeAreaIndex]: name }))}
+              />
+              <LayerPanel
+                layers={layers}
+                selectedLayerId={selectedLayerId}
+                onSelectLayer={handleSelectLayer}
+                onDeleteLayer={handleDeleteLayer}
+                onToggleVisible={handleToggleVisible}
+                onToggleLock={handleToggleLayerLock}
+                onReorder={handleReorderLayer}
+              />
+
+              {/* Selected element settings */}
+              {styleProps && (
+                <StylePanel
+                  style={styleProps}
+                  onTextChange={handleTextStyle}
+                  onImageChange={handleImageStyle}
+                  onShapeChange={handleShapeStyle}
+                />
+              )}
+              {selectedObjectProps && (
+                <PositionPanel
+                  objectProps={selectedObjectProps}
+                  relativeToPrintArea={!!activePrintArea}
+                  onPropChange={handlePropChange}
+                  onAlign={handleAlign}
+                />
+              )}
+              {selectedObjectProps && (
+                <ElementActions
+                  kind={styleProps?.kind === 'text' ? 'text' : styleProps?.kind === 'shape' || !styleProps ? 'element' : 'image'}
+                  locked={selectedObjectProps.locked}
+                  canReset={selectedObjectProps.modified}
+                  onReset={handleResetElement}
+                  onDelete={handleDelete}
+                  onDuplicate={handleDuplicate}
+                  sides={printAreas.map((a) => a.name)}
+                  currentSide={activeAreaIndex}
+                  onSendToSide={handleSendToSide}
+                />
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFileSelected} className="hidden" />
@@ -2046,6 +2332,7 @@ export default function PodEditor({ template, onTemplateChange, onRemoveTemplate
           mockups={mockups}
           initialTarget={preview.target}
           side={activeAreaIndex}
+          sideNames={printAreas.map((a) => a.name)}
           renderSide={renderSide}
           onUploadMockup={handleUploadMockupClick}
           mockupUpload={uploadTask?.kind === 'mockup' ? uploadTask : null}
