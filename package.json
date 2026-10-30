@@ -7,10 +7,13 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:render": "tsx scripts/test-render.ts"
+    "mockup:compile": "tsx scripts/compile-mockup.ts",
+    "mockup:validate": "tsx scripts/validate.ts",
+    "mockup:demo": "tsx scripts/render-demo.ts"
   },
   "dependencies": {
     "@harry2401/ag-psd": "^1.2.0",
+    "ag-psd": "^34",
     "fabric": "^7.4.0",
     "next": "16.4.3",
     "react": "19.3.0",
