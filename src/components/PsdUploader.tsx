@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useRef } from 'react'
-import { parsePsd } from '@/sections/pod-editor/utils/psd-parser'
+import { parseTemplateFile } from '@/sections/pod-editor/utils/template'
 import { useUploadProgress } from '@/sections/pod-editor/hooks/useUploadProgress'
 import UploadProgress from '@/sections/pod-editor/components/UploadProgress'
 import { IcPsd } from '@/components/icons'
@@ -23,9 +23,7 @@ export default function PsdUploader({ onTemplate }: PsdUploaderProps) {
       if (!file || isLoading) return
       try {
         const template = await run(file, 'psd', async () => {
-          const parsed = await parsePsd(await file.arrayBuffer())
-          parsed.name = file.name.replace(/\.psd$/i, '')
-          return parsed
+          return parseTemplateFile(await file.arrayBuffer(), file.name)
         })
         // Let the "done" state show briefly before entering the editor
         setTimeout(() => onTemplate(template), 450)

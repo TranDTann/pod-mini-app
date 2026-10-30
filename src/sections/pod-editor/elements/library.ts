@@ -1,4 +1,5 @@
 import { ARTWORKS } from './artworks'
+import { SCENES, type SceneKind } from './scenes'
 
 // Built-in element library: editable shapes, curved / stacked text presets and
 // themed illustration sets. Everything is vector (SVG / Fabric text) so it stays
@@ -34,6 +35,10 @@ export type ElementItem =
       editable?: boolean
       /** Painterly scene (gradients, depth) rather than a flat icon */
       art?: boolean
+      /** Large illustrated scene (landscape or character piece) */
+      scene?: SceneKind
+      /** Width / height, for scenes (tiles keep the picture's proportions) */
+      aspect?: number
     }
   | { id: string; name: string; kind: 'text'; parts: TextPart[] }
 
@@ -565,11 +570,14 @@ const SPORTS: ElementItem[] = [
     <polygon fill="#e9b44c" points="${polygonPoints(5, 11, 5)}" transform="translate(0 14)"/>`),
 ]
 
-/** Theme set: painterly artworks first, then the flat icons */
+/** Theme set: large scenes first, then the painterly artworks, then the flat icons */
 const theme = (id: string, title: string, icons: ElementItem[]): ElementCategory => ({
   id,
   title,
   items: [
+    ...SCENES.filter((s) => s.theme === id).map(
+      (s): ElementItem => ({ id: s.id, name: s.name, kind: 'svg', svg: s.svg, scene: s.kind, aspect: s.aspect }),
+    ),
     ...ARTWORKS.filter((a) => a.theme === id).map((a): ElementItem => ({ id: a.id, name: a.name, kind: 'svg', svg: a.svg, art: true })),
     ...icons,
   ],
