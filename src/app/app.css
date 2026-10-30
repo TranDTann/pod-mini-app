@@ -1,0 +1,160 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+  --font-mono: var(--font-geist-mono);
+
+  /* Neutrals with a faint green tint — fresh, calm, low contrast */
+  --color-app: #f3f6f2;
+  --color-stage: #e9eee7;
+  --color-surface: #fdfefc;
+  --color-surface-2: #f5f8f3;
+  --color-line: #e1e8de;
+  --color-line-strong: #cfd9cb;
+  --color-ink: #1c2620;
+  --color-ink-muted: #4f5d54;
+  --color-ink-subtle: #7f8c83;
+  --color-hover: #edf2ea;
+  /* Transparency checkerboard (layer & library thumbnails) */
+  --color-checker: #edf2ea;
+
+  /* Accent: jade green */
+  --color-accent: #23a06b;
+  --color-accent-hover: #1b875a;
+  --color-accent-soft: #e6f5ee;
+  --color-accent-line: #bfe5d2;
+
+  /* Secondary: teal (success / done states) */
+  --color-sage: #3f9a8a;
+  --color-sage-soft: #e5f3f0;
+
+  --color-danger: #d9534f;
+  --color-danger-soft: #fdeeed;
+
+  --shadow-soft: 0 1px 2px rgba(28, 48, 36, 0.04), 0 4px 14px rgba(28, 48, 36, 0.05);
+  --shadow-float: 0 2px 6px rgba(28, 48, 36, 0.05), 0 12px 32px rgba(28, 48, 36, 0.10);
+  --shadow-accent: 0 2px 4px rgba(35, 160, 107, 0.18), 0 8px 20px rgba(35, 160, 107, 0.22);
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background: var(--color-app);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+@keyframes tooltip-in {
+  from { opacity: 0; transform: var(--tt-from); }
+  to { opacity: 1; transform: var(--tt-to); }
+}
+
+@keyframes shimmer {
+  from { background-position: -200px 0; }
+  to { background-position: 200px 0; }
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.stage-dots {
+  background-color: var(--color-stage);
+  background-image: radial-gradient(rgba(60, 90, 70, 0.14) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+/* Hide number-input spinners in property fields */
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type='number'] {
+  -moz-appearance: textfield;
+}
+
+/* Soft range slider */
+input[type='range'] { -webkit-appearance: none; appearance: none; }
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  height: 16px; width: 16px; border-radius: 9999px;
+  background: #fff; border: 2px solid var(--color-accent);
+  box-shadow: 0 1px 4px rgba(28, 48, 36, 0.2);
+  transition: transform 120ms ease;
+}
+input[type='range']::-webkit-slider-thumb:hover { transform: scale(1.15); }
+input[type='range']::-moz-range-thumb {
+  height: 14px; width: 14px; border-radius: 9999px;
+  background: #fff; border: 2px solid var(--color-accent);
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes dialog-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Pointer cursor on everything clickable (Tailwind v4 preflight resets buttons to default).
+   Kept in the base layer so utilities like cursor-grab still override it. */
+@layer base {
+  button:not(:disabled),
+  [role='button'],
+  [role='switch'],
+  [role='tab'],
+  a[href],
+  label:has(input:not(:disabled)),
+  select:not(:disabled),
+  summary,
+  input[type='checkbox']:not(:disabled),
+  input[type='radio']:not(:disabled),
+  input[type='color']:not(:disabled),
+  input[type='range']:not(:disabled),
+  input[type='file']:not(:disabled) {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  select:disabled,
+  input:disabled {
+    cursor: not-allowed;
+  }
+}
+
+/* Thin, warm scrollbars that blend with the panels.
+   Chrome ignores ::-webkit-scrollbar once scrollbar-width is set, so the standard
+   properties are only for browsers without the webkit pseudo-elements (Firefox). */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line-strong) transparent;
+  }
+}
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-subtle);
+}
+::-webkit-scrollbar-button,
+::-webkit-scrollbar-corner {
+  display: none;
+  background: transparent;
+}
+

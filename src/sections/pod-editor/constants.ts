@@ -1,0 +1,14 @@
+export const CANVAS_WIDTH = 1200
+export const CANVAS_HEIGHT = 900
+export const PX_PER_INCH = 96
+export const MOCKUP_FIT_RATIO = 0.9
+export const THUMBNAIL_SCALE = 0.15
+export const DEFAULT_FONT_SIZE = 28
+export const DEFAULT_FONT_FAMILY = 'Arial'
+export const MIN_ZOOM = 0.1
+export const MAX_ZOOM = 4
+export const ZOOM_STEP = 1.2
+export const STAGE_PADDING = 64
+export const NUDGE_PX = 1
+export const NUDGE_PX_LARGE = 10
+export const PRINT_AREA_STROKE = '#23a06b'
