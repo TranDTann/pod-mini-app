@@ -294,7 +294,11 @@ export function expandPanelSection(id: string) {
   try {
     localStorage.setItem(COLLAPSE_KEY + id, '0')
   } catch {}
+  // Sections already on screen unfold too
+  window.dispatchEvent(new CustomEvent(EXPAND_EVENT, { detail: id }))
 }
+
+const EXPAND_EVENT = 'pod-editor:expand-section'
 
 function readCollapsed(id: string) {
   try {
@@ -321,6 +325,11 @@ export function PanelSection({
   children: ReactNode
 }) {
   const [collapsed, setCollapsed] = useState(() => readCollapsed(id))
+  useEffect(() => {
+    const onExpand = (e: Event) => (e as CustomEvent<string>).detail === id && setCollapsed(false)
+    window.addEventListener(EXPAND_EVENT, onExpand)
+    return () => window.removeEventListener(EXPAND_EVENT, onExpand)
+  }, [id])
   const toggle = () => {
     setCollapsed((c) => {
       try {
@@ -361,7 +370,7 @@ export function PanelSection({
         inert={collapsed}
       >
         {/* clip only while folded, so drop indicators / focus rings aren't cut when open */}
-        <div className={`min-h-0 ${collapsed ? 'overflow-hidden' : ''}`}>
+        <div className={`min-h-0 min-w-0 ${collapsed ? 'overflow-hidden' : ''}`}>
           <div className="pt-2.5 pb-1">{children}</div>
         </div>
       </div>

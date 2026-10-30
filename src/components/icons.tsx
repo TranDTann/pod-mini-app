@@ -135,8 +135,11 @@ export function IcLogo({ className }: IconProps) {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" className={className}>
       <rect width="24" height="24" rx="7" fill="#23a06b" />
-      <rect x="5.5" y="5.5" width="13" height="13" rx="2.5" stroke="#ffffff" strokeWidth="1.5" strokeDasharray="2.4 1.9" />
-      <path d="M12 8.2c.4 2.1 1.3 3 3.4 3.4-2.1.4-3 1.3-3.4 3.4-.4-2.1-1.3-3-3.4-3.4 2.1-.4 3-1.3 3.4-3.4Z" fill="#ffffff" />
+      <g stroke="#ffffff" strokeWidth="1.7" strokeLinejoin="round">
+        <path d="M3.5 16V8.4h1.6a1.9 1.9 0 0 1 0 3.8H3.5" />
+        <ellipse cx="12.05" cy="12.2" rx="2.5" ry="3.8" />
+        <path d="M17.05 8.4h.6a3.1 3.8 0 0 1 0 7.6h-.6Z" />
+      </g>
     </svg>
   )
 }

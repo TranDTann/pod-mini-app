@@ -20,15 +20,15 @@ function artwork(theme: string, id: string, name: string, build: (u: (name: stri
   }
 }
 
-const lin = (id: string, stops: [number, string, number?][], x2 = 0, y2 = 1) =>
+export const lin = (id: string, stops: [number, string, number?][], x2 = 0, y2 = 1) =>
   `<linearGradient id="${id}" x1="0" y1="0" x2="${x2}" y2="${y2}">${stops
     .map(([o, c, a]) => `<stop offset="${o}" stop-color="${c}"${a !== undefined ? ` stop-opacity="${a}"` : ''}/>`)
     .join('')}</linearGradient>`
-const rad = (id: string, stops: [number, string, number?][], cx = 0.5, cy = 0.5, r = 0.5) =>
+export const rad = (id: string, stops: [number, string, number?][], cx = 0.5, cy = 0.5, r = 0.5) =>
   `<radialGradient id="${id}" cx="${cx}" cy="${cy}" r="${r}">${stops
     .map(([o, c, a]) => `<stop offset="${o}" stop-color="${c}"${a !== undefined ? ` stop-opacity="${a}"` : ''}/>`)
     .join('')}</radialGradient>`
-const stars = (pts: [number, number, number][], fill = '#fff8e1') =>
+export const stars = (pts: [number, number, number][], fill = '#fff8e1') =>
   pts.map(([x, y, r]) => `<circle cx="${x}" cy="${y}" r="${r}" fill="${fill}"/>`).join('')
 const ring = (stroke = '#2b2233') => `<circle cx="50" cy="50" r="46" fill="none" stroke="${stroke}" stroke-width="2.5"/>`
 
